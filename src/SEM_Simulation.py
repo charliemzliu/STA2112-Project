@@ -122,41 +122,77 @@ def Linear_Gussian_DO(size, p, Coeff, mean, Variance, target, intervention):
 
     intervention: a list of (indices, values) pairs; each pair defines a
         separate environment, e.g. [([0], [4.0]), ([0,2], [1.0,-3.0])].
-    size: number of iid rows in EVERY environment, including e=1.
+    size: lengths for all environments, including observational e=1.
+        Accepts a vector with length E = 1 + len(intervention), or an
+        (E, 1) column array. size[e-1] is the sample size of environment e.
+        A positive integer scalar is also supported for backward compatibility
+        and assigns the same sample size to every environment.
     Do-interventions on the target are prohibited.
     """
-    size = _positive_integer(size, "size")
     coeff, means, noise_sds, target, order = _prepare_sem(
         p, Coeff, mean, Variance, target
     )
 
-    # Validate *all* interventions before starting any random sampling.
+    # Validate all interventions before starting any random sampling.
     interventions = []
     for env, specification in enumerate(intervention, start=2):
         if not isinstance(specification, (list, tuple)) or len(specification) != 2:
             raise ValueError(f"Intervention {env} must be (indices, values).")
+
         indices, values = specification
         indices = np.asarray(indices)
         values = np.asarray(values, dtype=float)
+
         if indices.ndim != 1 or values.ndim != 1 or len(indices) != len(values):
             raise ValueError(f"Intervention {env} requires two equal-length 1D arrays.")
+
         if any(not isinstance(j, (int, np.integer)) or isinstance(j, (bool, np.bool_))
                for j in indices):
             raise TypeError(f"Intervention {env} indices must be integers.")
+
         if len(set(indices.tolist())) != len(indices):
             raise ValueError(f"Intervention {env} repeats an index.")
+
         if any(j < 0 or j >= len(means) for j in indices):
             raise ValueError(f"Intervention {env} indices must be between 0 and p-1.")
+
         if target in indices:
             raise ValueError(f"Intervention {env} cannot intervene on target {target}.")
+
         if not np.isfinite(values).all():
             raise ValueError(f"Intervention {env} values must be finite.")
+
         interventions.append(dict(zip(map(int, indices), map(float, values))))
 
-    z_obs = _simulate(size, coeff, means, noise_sds, order)
+    # There are E environments: 1 observational plus one per do-intervention.
+    E = len(interventions) + 1
+
+    if isinstance(size, (int, np.integer)) and not isinstance(size, (bool, np.bool_)):
+        # Preserve the original scalar-size API.
+        sizes = [_positive_integer(size, "size")] * E
+    else:
+        sizes_array = np.asarray(size, dtype=object)
+
+        if sizes_array.ndim == 2 and sizes_array.shape[1] == 1:
+            sizes_array = sizes_array[:, 0]
+
+        if sizes_array.ndim != 1 or len(sizes_array) != E:
+            raise ValueError(f"size must contain {E} entries (one per environment).")
+
+        sizes = [
+            _positive_integer(count, f"size[{e - 1}]")
+            for e, count in enumerate(sizes_array, start=1)
+        ]
+
+    # Generate observational data (e = 1).
+    z_obs = _simulate(sizes[0], coeff, means, noise_sds, order)
     blocks = {1: _split_target(z_obs, target)}
+
+    # Generate each interventional environment (e = 2, 3, ...).
     for env, do_values in enumerate(interventions, start=2):
-        z_int = _simulate(size, coeff, means, noise_sds, order, do_values)
+        z_int = _simulate(
+            sizes[env - 1], coeff, means, noise_sds, order, do_values
+        )
         blocks[env] = _split_target(z_int, target)
 
     return InterventionData.from_environment_blocks(
