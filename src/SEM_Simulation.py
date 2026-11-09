@@ -120,13 +120,21 @@ def Linear_Gussian_SEM(n, p, Coeff, mean, Variance, target):
 def Linear_Gussian_DO(size, p, Coeff, mean, Variance, target, intervention):
     """Return observational and perfect-do interventional environments.
 
-    intervention: a list of (indices, values) pairs; each pair defines a
-        separate environment, e.g. [([0], [4.0]), ([0,2], [1.0,-3.0])].
+    
     size: lengths for all environments, including observational e=1.
         Accepts a vector with length E = 1 + len(intervention), or an
         (E, 1) column array. size[e-1] is the sample size of environment e.
         A positive integer scalar is also supported for backward compatibility
         and assigns the same sample size to every environment.
+    p: Number of variables in this model, including the target variable.
+    Coeff: An (p,p) array reprensting the linear gussian coefficient matrix.
+    mean: A (p,1) array crspding to all intercepts when generating this model.
+    Variance: A (p,1) array or a scalar of non-negative floats crspding to variance
+    of the noise in the generation. If Variance is a scalar, then all noise variance 
+    are set to this scalar.
+    target: The target variable's index, notice the index start at 0.
+    intervention: a list of (indices, values) pairs; each pair defines a
+        separate environment, e.g. [([0], [4.0]), ([0,2], [1.0,-3.0])].
     Do-interventions on the target are prohibited.
     """
     coeff, means, noise_sds, target, order = _prepare_sem(
