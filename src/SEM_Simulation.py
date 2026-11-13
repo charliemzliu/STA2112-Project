@@ -206,3 +206,19 @@ def Linear_Gussian_DO(size, p, Coeff, mean, Variance, target, intervention):
     return InterventionData.from_environment_blocks(
         blocks, Causals=_causal_indices(coeff, target)
     )
+
+
+
+"""                       Work in progress                  """
+
+def Linear_Gussian_Noise()
+
+
+def 
+
+
+
+
+
+
+
