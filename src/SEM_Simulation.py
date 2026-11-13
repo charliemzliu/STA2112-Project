@@ -211,10 +211,10 @@ def Linear_Gussian_DO(size, p, Coeff, mean, Variance, target, intervention):
 
 """                       Work in progress                  """
 
-def Linear_Gussian_Noise()
+#def Linear_Gussian_Noise()
 
 
-def 
+#def 
 
 
 
