@@ -2,12 +2,13 @@
 
 A total of p structural variables Z_0, ..., Z_{p-1} are generated via
     Z_i = mean[i] + sum_j Coeff[i, j] * Z_j + epsilon_i,
-with mutually independent epsilon_i ~ N(0, Variance[i]).
+with mutually independent epsilon_i ~ N(0, Variance[i]). Hidden nodes are
+simulated but not observed, and cannot be directly intervened on.
 """
 
 import numpy as np
 
-try:  # When imported as src.Linear_Gaussian_SEM
+try:  # When imported as src.SEM_Simulation
     from .InterventionData import InterventionData
 except ImportError:  # When the files are on the same Python import path
     from InterventionData import InterventionData
@@ -66,6 +67,35 @@ def _prepare_sem(p, Coeff, mean, Variance, target):
     return coeff, means, np.sqrt(variances), target, order
 
 
+def _validate_hidden(p, target, hidden):
+    """Validate hidden indices in the full SEM."""
+    if hidden is None:
+        return ()
+    if isinstance(hidden, (str, bytes)):
+        raise TypeError("hidden must be an iterable of 0-based integer indices.")
+    try:
+        nodes = tuple(hidden)
+    except TypeError as exc:
+        raise TypeError("hidden must be an iterable of 0-based integer indices.") from exc
+    if any(not isinstance(j, (int, np.integer)) or isinstance(j, (bool, np.bool_))
+           for j in nodes):
+        raise TypeError("hidden must contain integer SEM indices.")
+    nodes = tuple(int(j) for j in nodes)
+    if len(set(nodes)) != len(nodes):
+        raise ValueError("hidden cannot contain duplicate indices.")
+    if any(j < 0 or j >= p for j in nodes):
+        raise ValueError("hidden indices must be between 0 and p - 1.")
+    if target in nodes:
+        raise ValueError("The target variable cannot be hidden.")
+    return nodes
+
+
+def _predictor_nodes(p, target, hidden=()):
+    """Map predictor-column indices to full SEM indices, in SEM order."""
+    excluded = set(hidden) | {target}
+    return [j for j in range(p) if j not in excluded]
+
+
 def _simulate(n, coeff, means, noise_sds, order, do_values=None):
     """Generate n iid samples of all p structural variables."""
     p = len(means)
@@ -84,62 +114,69 @@ def _simulate(n, coeff, means, noise_sds, order, do_values=None):
     return z
 
 
-def _split_target(z, target):
-    """Return (predictors, target) with target excluded from predictors."""
-    return np.delete(z, target, axis=1), z[:, target].copy()
+def _split_target(z, target, hidden=()):
+    """Return observed predictors and target after full SEM simulation."""
+    return z[:, _predictor_nodes(z.shape[1], target, hidden)], z[:, target].copy()
 
 
-def _causal_indices(coeff, target):
-    """Return direct parents in *predictor-column* indexing."""
-    predictor_nodes = [j for j in range(coeff.shape[0]) if j != target]
+def _causal_indices(coeff, target, hidden=()):
+    """Return observed direct parents in predictor-column indexing."""
+    predictor_nodes = _predictor_nodes(coeff.shape[0], target, hidden)
     return tuple(k for k, j in enumerate(predictor_nodes) if coeff[target, j] != 0)
 
 
-def Linear_Gussian_SEM(n, p, Coeff, mean, Variance, target):
+def Linear_Gaussian_SEM(n, p, Coeff, mean, Variance, target, hidden=None):
     """Return an observational InterventionData object (environment e=1).
 
-    `p` is the total number of SEM variables, including the target.
+    p is the total number of SEM variables, including target and hidden nodes.
     Coeff[i,j] is the effect of variable j on variable i.
-    `mean` contains structural intercepts, not necessarily marginal means.
-    `Variance` is a scalar or p-vector of noise variances.
+    mean contains structural intercepts, not necessarily marginal means.
+    Variance is a scalar or p-vector of noise variances.
+    hidden is an optional iterable of 0-based full SEM indices. Hidden nodes
+    are generated normally but excluded from X. Causals contains only observed
+    direct parents in predictor-column indexing.
     """
     n = _positive_integer(n, "n")
     coeff, means, noise_sds, target, order = _prepare_sem(
         p, Coeff, mean, Variance, target
     )
+    hidden = _validate_hidden(len(means), target, hidden)
     z = _simulate(n, coeff, means, noise_sds, order)
-    x, y = _split_target(z, target)
+    x, y = _split_target(z, target, hidden)
     return InterventionData(
         X=x,
         Y=y,
         environments=np.ones(n, dtype=int),
-        Causals=_causal_indices(coeff, target),
+        Causals=_causal_indices(coeff, target, hidden),
     )
 
 
-def Linear_Gussian_DO(size, p, Coeff, mean, Variance, target, intervention):
+def Linear_Gaussian_DO(size, p, Coeff, mean, Variance, target, intervention, hidden=None):
     """Return observational and perfect-do interventional environments.
 
-    
     size: lengths for all environments, including observational e=1.
         Accepts a vector with length E = 1 + len(intervention), or an
         (E, 1) column array. size[e-1] is the sample size of environment e.
         A positive integer scalar is also supported for backward compatibility
         and assigns the same sample size to every environment.
-    p: Number of variables in this model, including the target variable.
-    Coeff: An (p,p) array reprensting the linear gussian coefficient matrix.
-    mean: A (p,1) array crspding to all intercepts when generating this model.
-    Variance: A (p,1) array or a scalar of non-negative floats crspding to variance
-    of the noise in the generation. If Variance is a scalar, then all noise variance 
-    are set to this scalar.
-    target: The target variable's index, notice the index start at 0.
+    p: Total number of variables, including target and hidden nodes.
+    Coeff: A (p, p) coefficient matrix; Coeff[i,j] is the effect of j on i.
+    mean: A (p,) vector of structural intercepts.
+    Variance: A (p,) vector or scalar of nonnegative noise variances.
+    target: The target's 0-based index in the full SEM.
     intervention: a list of (indices, values) pairs; each pair defines a
         separate environment, e.g. [([0], [4.0]), ([0,2], [1.0,-3.0])].
-    Do-interventions on the target are prohibited.
+    hidden: Optional iterable of 0-based full SEM indices of hidden variables.
+        Hidden nodes may occur anywhere in the DAG and are simulated normally.
+    Intervention indices refer to the full SEM, not columns of returned X.
+    Do-interventions on the target and hidden variables are prohibited.
+    X contains observed predictors in original SEM order, and Causals contains
+    only observed direct parents in predictor-column indexing.
     """
     coeff, means, noise_sds, target, order = _prepare_sem(
         p, Coeff, mean, Variance, target
     )
+    hidden = _validate_hidden(len(means), target, hidden)
 
     # Validate all interventions before starting any random sampling.
     interventions = []
@@ -166,6 +203,11 @@ def Linear_Gussian_DO(size, p, Coeff, mean, Variance, target, intervention):
 
         if target in indices:
             raise ValueError(f"Intervention {env} cannot intervene on target {target}.")
+
+        hidden_targets = set(indices.tolist()).intersection(hidden)
+        if hidden_targets:
+            raise ValueError(f"Intervention {env} cannot intervene on hidden nodes "
+                             f"{sorted(hidden_targets)}.")
 
         if not np.isfinite(values).all():
             raise ValueError(f"Intervention {env} values must be finite.")
@@ -194,31 +236,24 @@ def Linear_Gussian_DO(size, p, Coeff, mean, Variance, target, intervention):
 
     # Generate observational data (e = 1).
     z_obs = _simulate(sizes[0], coeff, means, noise_sds, order)
-    blocks = {1: _split_target(z_obs, target)}
+    blocks = {1: _split_target(z_obs, target, hidden)}
 
     # Generate each interventional environment (e = 2, 3, ...).
     for env, do_values in enumerate(interventions, start=2):
         z_int = _simulate(
             sizes[env - 1], coeff, means, noise_sds, order, do_values
         )
-        blocks[env] = _split_target(z_int, target)
+        blocks[env] = _split_target(z_int, target, hidden)
 
     return InterventionData.from_environment_blocks(
-        blocks, Causals=_causal_indices(coeff, target)
+        blocks, Causals=_causal_indices(coeff, target, hidden)
     )
 
 
 
 """                       Work in progress                  """
 
-#def Linear_Gussian_Noise()
+#def Linear_Gaussian_Noise()
 
 
-#def 
-
-
-
-
-
-
-
+#def
