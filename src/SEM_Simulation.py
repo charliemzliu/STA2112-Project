@@ -1,11 +1,13 @@
-"""Simulate observational and do-interventional linear Gaussian DAG SEMs.
+"""Simulate observational and do-interventional additive Gaussian-noise DAG SEMs.
 
 A total of p structural variables Z_0, ..., Z_{p-1} are generated via
-    Z_i = mean[i] + sum_j Coeff[i, j] * Z_j + epsilon_i,
+    Z_i = mean[i] + sum_j Coeff[i, j] * f_ij(Z_j) + epsilon_i,
+where f_ij is the identity for linear or unspecified edges.
 with mutually independent epsilon_i ~ N(0, Variance[i]). Hidden nodes are
 simulated but not observed, and cannot be directly intervened on.
 """
 
+from collections.abc import Mapping
 import numpy as np
 
 try:  # When imported as src.SEM_Simulation
@@ -96,11 +98,76 @@ def _predictor_nodes(p, target, hidden=()):
     return [j for j in range(p) if j not in excluded]
 
 
-def _simulate(n, coeff, means, noise_sds, order, do_values=None):
+# Each transformation acts elementwise on a vector of observations.
+# "exp" uses the scaled, centered exponential discussed in the model design.
+_FUNCTIONS = {
+    "linear": lambda x: x,
+    "quadratic": np.square,
+    "cubic": lambda x: x ** 3,
+    "exp": lambda x: np.expm1(0.5 * x),
+    "log": np.log,
+    "log1p": np.log1p,
+    "abs": np.abs,
+    "sqrt": np.sqrt,
+    "sin": np.sin,
+    "cos": np.cos,
+    "tanh": np.tanh,
+}
+
+
+def _prepare_functions(coeff, functions):
+    """Validate edge transformations and normalize them to ordered tuples."""
+    if functions is None:
+        return {}
+    if not isinstance(functions, Mapping):
+        raise TypeError("Functions must be a mapping from (child, parent) to names.")
+    p = coeff.shape[0]
+    result = {}
+    for edge, spec in functions.items():
+        if (not isinstance(edge, tuple) or len(edge) != 2
+                or any(not isinstance(j, (int, np.integer))
+                       or isinstance(j, (bool, np.bool_)) for j in edge)):
+            raise TypeError("Each Functions key must be a pair of integer SEM indices.")
+        child, parent = map(int, edge)
+        if not (0 <= child < p and 0 <= parent < p):
+            raise ValueError(f"Functions edge {edge} has an index outside 0 to {p - 1}.")
+        if coeff[child, parent] == 0:
+            raise ValueError(f"Functions edge {edge} must have a nonzero Coeff entry.")
+        if isinstance(spec, str):
+            names = (spec,)
+        elif isinstance(spec, (list, tuple)) and spec:
+            names = tuple(spec)
+        else:
+            raise ValueError(f"Functions edge {edge} requires a name or nonempty list/tuple of names.")
+        for name in names:
+            if not isinstance(name, str) or name not in _FUNCTIONS:
+                raise ValueError(f"Unknown transformation {name!r} on edge {edge}. "
+                                 f"Available names: {', '.join(_FUNCTIONS)}.")
+        result[(child, parent)] = names
+    return result
+
+
+def _transform(values, names, child, parent, environment):
+    """Apply an ordered composition, checking every intermediate result."""
+    for name in names:
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            values = _FUNCTIONS[name](values)
+        if not np.isfinite(values).all():
+            raise ValueError(
+                f"Environment {environment}: transformation {name!r} on edge "
+                f"({child}, {parent}) produced NaN or infinity. Check its domain "
+                "and the magnitude of the input."
+            )
+    return values
+
+
+def _simulate(n, coeff, means, noise_sds, order, do_values=None,
+              functions=None, environment=1):
     """Generate n iid samples of all p structural variables."""
     p = len(means)
     z = np.empty((n, p), dtype=float)
     do_values = {} if do_values is None else do_values
+    functions = {} if functions is None else functions
 
     for j in order:
         if j in do_values:
@@ -110,7 +177,20 @@ def _simulate(n, coeff, means, noise_sds, order, do_values=None):
             parents = np.flatnonzero(coeff[j, :] != 0)
             z[:, j] = means[j] + np.random.normal(0, noise_sds[j], size=n)
             if len(parents):
-                z[:, j] += z[:, parents] @ coeff[j, parents]
+                if any((j, k) in functions for k in parents):
+                    transformed = np.column_stack([
+                        _transform(z[:, k], functions.get((j, k), ()),
+                                   j, k, environment)
+                        for k in parents
+                    ])
+                    with np.errstate(over="ignore", invalid="ignore"):
+                        z[:, j] += transformed @ coeff[j, parents]
+                else:
+                    # Preserve the original linear calculation.
+                    z[:, j] += z[:, parents] @ coeff[j, parents]
+        if functions and not np.isfinite(z[:, j]).all():
+            raise ValueError(f"Environment {environment}: SEM node {j} "
+                             "produced NaN or infinity.")
     return z
 
 
@@ -125,7 +205,7 @@ def _causal_indices(coeff, target, hidden=()):
     return tuple(k for k, j in enumerate(predictor_nodes) if coeff[target, j] != 0)
 
 
-def Linear_Gaussian_SEM(n, p, Coeff, mean, Variance, target, hidden=None):
+def _gaussian_sem(n, p, Coeff, mean, Variance, target, hidden=None, functions=None):
     """Return an observational InterventionData object (environment e=1).
 
     p is the total number of SEM variables, including target and hidden nodes.
@@ -141,7 +221,8 @@ def Linear_Gaussian_SEM(n, p, Coeff, mean, Variance, target, hidden=None):
         p, Coeff, mean, Variance, target
     )
     hidden = _validate_hidden(len(means), target, hidden)
-    z = _simulate(n, coeff, means, noise_sds, order)
+    functions = _prepare_functions(coeff, functions)
+    z = _simulate(n, coeff, means, noise_sds, order, functions=functions)
     x, y = _split_target(z, target, hidden)
     return InterventionData(
         X=x,
@@ -151,7 +232,8 @@ def Linear_Gaussian_SEM(n, p, Coeff, mean, Variance, target, hidden=None):
     )
 
 
-def Linear_Gaussian_DO(size, p, Coeff, mean, Variance, target, intervention, hidden=None):
+def _gaussian_do(size, p, Coeff, mean, Variance, target, intervention,
+                 hidden=None, functions=None):
     """Return observational and perfect-do interventional environments.
 
     size: lengths for all environments, including observational e=1.
@@ -177,6 +259,8 @@ def Linear_Gaussian_DO(size, p, Coeff, mean, Variance, target, intervention, hid
         p, Coeff, mean, Variance, target
     )
     hidden = _validate_hidden(len(means), target, hidden)
+
+    functions = _prepare_functions(coeff, functions)
 
     # Validate all interventions before starting any random sampling.
     interventions = []
@@ -235,13 +319,14 @@ def Linear_Gaussian_DO(size, p, Coeff, mean, Variance, target, intervention, hid
         ]
 
     # Generate observational data (e = 1).
-    z_obs = _simulate(sizes[0], coeff, means, noise_sds, order)
+    z_obs = _simulate(sizes[0], coeff, means, noise_sds, order, functions=functions)
     blocks = {1: _split_target(z_obs, target, hidden)}
 
     # Generate each interventional environment (e = 2, 3, ...).
     for env, do_values in enumerate(interventions, start=2):
         z_int = _simulate(
-            sizes[env - 1], coeff, means, noise_sds, order, do_values
+            sizes[env - 1], coeff, means, noise_sds, order, do_values,
+            functions=functions, environment=env
         )
         blocks[env] = _split_target(z_int, target, hidden)
 
@@ -249,6 +334,65 @@ def Linear_Gaussian_DO(size, p, Coeff, mean, Variance, target, intervention, hid
         blocks, Causals=_causal_indices(coeff, target, hidden)
     )
 
+
+
+def Linear_Gaussian_SEM(n, p, Coeff, mean, Variance, target, hidden=None):
+    """Generate observational linear Gaussian SEM data.
+
+    p counts all SEM nodes (including target and hidden nodes).
+    Coeff[i,j] is the coefficient of parent j in node i's equation.
+    mean and Variance are structural intercepts and noise variances.
+    target and hidden use full, 0-based SEM indexing. Returned Causals
+    contains observed direct parents in predictor-column indexing.
+    """
+    return _gaussian_sem(n, p, Coeff, mean, Variance, target, hidden=hidden)
+
+
+def Linear_Gaussian_DO(size, p, Coeff, mean, Variance, target, intervention, hidden=None):
+    """Generate observational and perfect-do linear Gaussian SEM data.
+
+    size is a scalar or a vector of sizes, observational environment first.
+    intervention is a list of (indices, values) pairs, one per environment.
+    target, hidden and intervention indices use full, 0-based SEM indexing.
+    Interventions on target and hidden nodes are prohibited.
+    """
+    return _gaussian_do(size, p, Coeff, mean, Variance, target,
+                        intervention, hidden=hidden)
+
+
+def Nonlinear_Gaussian_SEM(n, p, Coeff, mean, Variance, target,
+                           Functions=None, hidden=None):
+    """Generate observational data from an additive nonlinear SEM.
+
+    Each node is its intercept plus the weighted sum of transformed parents
+    plus independent Gaussian noise. Coeff[i,j] != 0 specifies j -> i.
+    Functions maps (child, parent) in full SEM indexing to a transformation
+    name or an ordered list/tuple of names, applied left to right. Unspecified
+    edges are linear. For example, {(1, 0): ["abs", "log"]} gives log(abs(Z_0)).
+    Available names: linear, quadratic, cubic, exp (expm1(0.5*x)),
+    log, log1p, abs, sqrt, sin, cos, tanh.
+    Hidden nodes are generated but not returned. Causals contains observed
+    direct parents in predictor-column indexing.
+    Invalid domains and nonfinite transformation results raise ValueError.
+    """
+    return _gaussian_sem(n, p, Coeff, mean, Variance, target,
+                         hidden=hidden, functions=Functions)
+
+
+def Nonlinear_Gaussian_DO(size, p, Coeff, mean, Variance, target, intervention,
+                          Functions=None, hidden=None):
+    """Generate observational and perfect-do additive nonlinear SEM data.
+
+    Uses the same Functions specification as Nonlinear_Gaussian_SEM.
+    Functions, coefficients, intercepts and noise variances stay fixed across
+    environments, except that a do-intervention replaces the intervened
+    node's structural equation with its specified constant value.
+    size is a scalar or a vector (one entry per environment, including e=1).
+    intervention is a list of (indices, values) pairs in full SEM indexing.
+    Interventions on target and hidden nodes are prohibited.
+    """
+    return _gaussian_do(size, p, Coeff, mean, Variance, target,
+                        intervention, hidden=hidden, functions=Functions)
 
 
 """                       Work in progress                  """
