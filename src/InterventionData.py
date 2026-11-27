@@ -11,12 +11,17 @@ class InterventionData:
     Y: shape (n,).
     environments: shape (n,), one label per observation.
     Causals: 0-based predictor indices of the true direct causes of Y.
+    intervention_targets: optional mapping from each environment label to the
+        set of directly intervened predictor-column indices (0-based, in X).
+        An empty set means no intervention; None means targets are unknown.
+        The original response Y must not be directly intervened on.
     """
 
     X: np.ndarray
     Y: np.ndarray
     environments: np.ndarray
     Causals: tuple[int, ...]
+    intervention_targets: Mapping[object, set[int]] | None = None
 
     def __post_init__(self):
         self.X = np.asarray(self.X, dtype=float)
@@ -54,13 +59,30 @@ class InterventionData:
         if any(j < 0 or j >= p for j in self.Causals):
             raise ValueError("Every index in Causals must be between 0 and p - 1.")
 
+        if self.intervention_targets is not None:
+            if not isinstance(self.intervention_targets, Mapping):
+                raise TypeError("intervention_targets must be a mapping or None.")
+            if set(self.intervention_targets) != set(self.E):
+                raise ValueError("intervention_targets must specify every environment label exactly once.")
+            normalized = {}
+            for e, targets in self.intervention_targets.items():
+                indices = tuple(targets)
+                if any(not isinstance(j, (int, np.integer)) or isinstance(j, (bool, np.bool_))
+                       for j in indices):
+                    raise TypeError("Intervention targets must be integer predictor indices.")
+                if any(j < 0 or j >= p for j in indices):
+                    raise ValueError("Intervention targets must be between 0 and p - 1.")
+                normalized[e] = {int(j) for j in indices}
+            self.intervention_targets = normalized
+
     @classmethod
     def from_environment_blocks(
         cls,
         blocks: Mapping[object, tuple[np.ndarray, np.ndarray]],
         Causals: tuple[int, ...],
+        intervention_targets: Mapping[object, set[int]] | None = None,
     ) -> "InterventionData":
-        """Construct from {environment_label: (X_e, Y_e)}."""
+        """Construct from {environment_label: (X_e, Y_e)}, with optional targets."""
         if not blocks:
             raise ValueError("At least one environment is required.")
 
@@ -83,6 +105,7 @@ class InterventionData:
             Y=np.concatenate(Y_parts),
             environments=np.asarray(labels),
             Causals=Causals,
+            intervention_targets=intervention_targets,
         )
 
     def __repr__(self):
