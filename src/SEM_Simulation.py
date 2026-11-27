@@ -229,6 +229,7 @@ def _gaussian_sem(n, p, Coeff, mean, Variance, target, hidden=None, functions=No
         Y=y,
         environments=np.ones(n, dtype=int),
         Causals=_causal_indices(coeff, target, hidden),
+        intervention_targets={1: set()},
     )
 
 
@@ -254,6 +255,8 @@ def _gaussian_do(size, p, Coeff, mean, Variance, target, intervention,
     Do-interventions on the target and hidden variables are prohibited.
     X contains observed predictors in original SEM order, and Causals contains
     only observed direct parents in predictor-column indexing.
+    Returned intervention_targets maps each environment label to the set of
+    directly intervened predictor-column indices (environment 1 is empty).
     """
     coeff, means, noise_sds, target, order = _prepare_sem(
         p, Coeff, mean, Variance, target
@@ -330,8 +333,20 @@ def _gaussian_do(size, p, Coeff, mean, Variance, target, intervention,
         )
         blocks[env] = _split_target(z_int, target, hidden)
 
+    # Translate full SEM indices to the returned predictor-column indices.
+    # This matters when the original target or a hidden node is not last.
+    node_to_column = {
+        node: column
+        for column, node in enumerate(_predictor_nodes(len(means), target, hidden))
+    }
+    intervention_targets = {1: set()}
+    for env, do_values in enumerate(interventions, start=2):
+        intervention_targets[env] = {node_to_column[node] for node in do_values}
+
     return InterventionData.from_environment_blocks(
-        blocks, Causals=_causal_indices(coeff, target, hidden)
+        blocks,
+        Causals=_causal_indices(coeff, target, hidden),
+        intervention_targets=intervention_targets,
     )
 
 
