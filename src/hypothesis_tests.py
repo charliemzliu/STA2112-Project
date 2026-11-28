@@ -9,7 +9,7 @@ Expected InterventionData interface
 - data.E: iterable of environment labels
 - data.get_environment(e, S, add_intercept=True) -> (X_e, y_e)
 - data.get_complement(e, S, add_intercept=True) -> (X_minus_e, y_minus_e)
-- data.get_all(S) -> (X_pooled, y_pooled), with intercept in column 0
+- data.get_all(S, add_intercept=True) -> (X_pooled, y_pooled), with intercept in column 0
 
 S consists of zero-based predictor column indices (intercept excluded).
 No knowledge of intervention targets or data-generation mechanism is needed.
@@ -109,7 +109,7 @@ def method2_pvalue(data: Any, S: Iterable[int]) -> float:
     """
     S = _subset(data, S)
     envs = _environments(data)
-    X, y = data.get_all(S)
+    X, y = data.get_all(S, add_intercept=True)
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float).reshape(-1)
     beta, residuals, _ = _ols(X, y)
@@ -151,7 +151,7 @@ def pooled_rectangular_ci(data: Any, S: Iterable[int], alpha: float = 0.05) -> d
         raise ValueError("alpha must be strictly between 0 and 1.")
     if not S:
         return {}
-    X, y = data.get_all(S)
+    X, y = data.get_all(S, add_intercept=True)
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float).reshape(-1)
     if X.shape[1] != len(S) + 1:
